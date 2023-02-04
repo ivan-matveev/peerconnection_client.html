@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>PeerConnection server test page</title>
+
+<script>
+
+"use strict";
+
+// var localName;
+var server;
+var message_counter = 0;
+var ws = undefined;
+
+let peerConnection;
+let canvasStream;
+
+const CANVAS_FRAME_WIDTH = 320;
+const CANVAS_FRAME_HEIGHT = 240;
+
+function stringify(data) {
+  return JSON.stringify(data, null, 2);
+}
+
+window.onload = () => { window_onload(); };
+
+function window_onload()
+{
+	canvasStream = canvasDraw(CANVAS_FRAME_WIDTH, CANVAS_FRAME_HEIGHT);
+	let localVideo = document.getElementById("localVideoCtl");
+
+  if (!window.isSecureContext) {
+    trace("window.isSecureContext: can not capture audio/video");
+    localVideo.srcObject = canvasStream;
+    localVideo.play();
+    return;
+  }
+
+  navigator.getUserMedia = navigator.getUserMedia || navigator.webkitGetUserMedia || navigator.mozGetUserMedia || navigator.msGetUserMedia;
+  window.URL = window.URL || window.webkitURL || window.mozURL || window.msURL;
+
+  if (navigator.mediaDevices.getUserMedia) {
+    navigator.mediaDevices.enumerateDevices()
+      .then(function (deviceInfos) {
+        trace("devices: " + stringify(deviceInfos));
+        for (const deviceInfo of deviceInfos) {
+          trace("device: " + deviceInfo.kind + " " + deviceInfo.label);
+        }
+      })
+      .catch(function (err) {
+        trace("failed: navigator.mediaDevices.getUserMedia()" + err);
+      });
+    navigator.mediaDevices.getUserMedia({ video: true, audio: true })
+      .then(function (stream) {
+        localVideo.srcObject = stream;
+      })
+      .catch(function (err) {
+        trace("failed: navigator.mediaDevices.getUserMedia()" + err);
+        localVideo.srcObject = canvasStream;
+        localVideo.play();
+      });
+  }
+}
+
+function trace(txt) {
+  console.log(txt);
+  var elem = document.getElementById("trace");
+  elem.innerHTML += txt + "<br>";
+}
+
+function handlePeerMessage(peer_id, data) {
+  ++message_counter;
+
+  let data_json = { type : "unknown" };
+  try {
+    data_json = JSON.parse(data);
+  }
+  catch(err)
+  {
+    trace("failed: JSON.parse()");
+    data_json = { type : "unknown" };
+  }
+  trace("handlePeerMessage():" + data_json["type"] + "\n" + data);
+  if (data_json["type"] === "offer") {
+	  trace("offer");
+	  handleOffer(peer_id, data_json);
+  }
+  else if (data_json["type"] === "answer") {
+	  trace("answer");
+	  handleAnswer(data_json);
+  }
+  else if (data_json["candidate"]) {
+	  trace("candidate");
+	  handleCandidate(data_json);
+  }
+  else if (data_json["type"] === "disconnect") {
+	  trace("disconnect");
+	  close();
+  }
+}
+
+function handleCandidate(candidate)
+{
+	let addIceCandidatePromise = peerConnection.addIceCandidate(candidate);
+	addIceCandidatePromise.then(
+	  () => { trace("addIceCandidate() OK"); },
+	  reason => { trace("addIceCandidate() failed: " + reason); }
+	);
+}
+
+function handleAnswer(answer)
+{
+  let setRemotePromise = peerConnection.setRemoteDescription(answer);
+  setRemotePromise.then(
+    () => { trace("setRemoteDescription(answer) OK"); },
+    reason => { trace("setRemoteDescription(answer) failed: " + reason); }
+  );
+}
+
+function setRemoteOfferDone() {
+  trace('setRemoteDone');
+  let createAnswerPromise = peerConnection.createAnswer();
+  createAnswerPromise.then(
+    createAnswerDone,
+    reason => { trace("setRemoteOfferDone() failed: " + reason); }
+  );
+}
+
+function createAnswerDone(answer) {
+  trace('createAnswerDone');
+  let setLocalPromise = peerConnection.setLocalDescription(answer);
+  setLocalPromise.then(
+    () => { trace("createAnswerDone() OK"); },
+    reason => { trace("createAnswerDone() failed: " + reason); }
+  );
+}
+
+let offer_peer_id = -1;
+
+function handleOffer(peer_id, offer)
+{
+  if (offer_peer_id != -1) {
+    trace("handleOffer() in progress");
+    return;
+  }
+
+  let video_element = document.getElementById("remoteVideoCtl");
+  let localVideo = document.getElementById("localVideoCtl");
+  peerConnection = createPeerConnection(lasticecandidate, video_element, localVideo.srcObject);
+
+  offer_peer_id = peer_id;
+  let setRemotePromise = peerConnection.setRemoteDescription(offer);
+  setRemotePromise.then(
+    setRemoteOfferDone,
+    reason => { trace("setRemoteDescription() failed: " + reason); }
+    );
+}
+
+async function sendToPeer(data) {
+  ws.send(data);
+}
+
+function connect() {
+  server = document.getElementById("server").value.toLowerCase();
+
+//   localName = document.getElementById("localName").value.toLowerCase();
+//   if (localName.length == 0) {
+//     alert("I need a name please.");
+//     document.getElementById("localName").focus();
+//     return;
+//   }
+
+  document.getElementById("connect").disabled = true;
+  document.getElementById("disconnect").disabled = false;
+  document.getElementById("call").disabled = false;
+
+  let server_url = document.getElementById('server').value;
+  trace("server_url: " + server_url);
+  ws = new WebSocket(server_url);
+  ws.onopen = function() { trace("onopen()"); };          
+  ws.onclose = function() { trace("onclose()"); };
+  ws.onerror = function(event) { trace("onerror(): " + event); };
+
+  ws.onmessage = function (evt) { 
+    var received_msg = evt.data;
+    trace("onmessage():" + received_msg);
+    //handlePeerMessage(peer_id, data)
+    handlePeerMessage(1, received_msg);
+  };
+}
+
+function close() {
+  if (ws)
+  {
+    ws.close();
+  }
+
+  if (peerConnection)
+  {
+    peerConnection.close();
+  }
+
+  document.getElementById("connect").disabled = false;
+  document.getElementById("disconnect").disabled = true;
+  document.getElementById("send").disabled = true;
+}
+
+function disconnect() {
+
+  if (ws)
+  {
+    ws.send(JSON.stringify({ type: "disconnect" }));
+  }
+
+  close();
+}
+
+window.onbeforeunload = () => { disconnect(); }
+
+function call() {
+  let video_element = document.getElementById("remoteVideoCtl");
+  let localVideo = document.getElementById("localVideoCtl");
+  peerConnection = createPeerConnection(lasticecandidate, video_element, localVideo.srcObject);
+
+  let createOfferPromise = peerConnection.createOffer();
+  createOfferPromise.then(
+    createOfferDone,
+    reason => { trace("createOffer() failed: " + reason); }
+  );
+}
+
+function createOfferDone(offer) {
+  trace('createOfferDone');
+  let setLocalPromise = peerConnection.setLocalDescription(offer);
+  setLocalPromise.then(
+    () => { trace("createOfferDone OK"); },
+    reason => { trace("createOfferDone failed: " + reason); }
+  );
+}
+
+function lasticecandidate() {
+  trace('lasticecandidate');
+  var peer_id = 1;
+  let offer = peerConnection.localDescription;
+  if (peer_id) {
+    sendToPeer(JSON.stringify(offer.toJSON()));
+  }
+  else {
+	  sendToPeer(JSON.stringify(offer.toJSON()));
+	  offer_peer_id = -1;
+  }
+}
+
+function toggleMe(obj) {
+  var id = obj.id.replace("toggle", "msg");
+  var t = document.getElementById(id);
+  if (obj.innerText == "+") {
+    obj.innerText = "-";
+    t.style.display = "block";
+  } else {
+    obj.innerText = "+";
+    t.style.display = "none";
+  }
+}
+
+function uuidv4() {
+  return ([1e7]+-1e3+-4e3+-8e3+-1e11).replace(/[018]/g, c =>
+    (c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> c / 4).toString(16)
+  );
+}
+
+var media_events = new Array();
+media_events["loadstart"] = 0;
+// media_events["progress"] = 0;  // too noisy
+media_events["suspend"] = 0;
+media_events["abort"] = 0;
+media_events["error"] = 0;
+media_events["emptied"] = 0;
+media_events["stalled"] = 0;
+media_events["loadedmetadata"] = 0;
+media_events["loadeddata"] = 0;
+media_events["canplay"] = 0;
+media_events["canplaythrough"] = 0;
+media_events["playing"] = 0;
+media_events["waiting"] = 0;
+media_events["seeking"] = 0;
+media_events["seeked"] = 0;
+media_events["ended"] = 0;
+media_events["durationchange"] = 0;
+// media_events["timeupdate"] = 0;  // too noisy
+media_events["play"] = 0;
+media_events["pause"] = 0;
+media_events["ratechange"] = 0;
+media_events["resize"] = 0;
+media_events["volumechange"] = 0;
+
+function createPeerConnection(lasticecandidate, video_element, video_stream) {
+//   let configuration = {
+//     iceServers: [{
+//       urls: "stun:stun.stunprotocol.org"}]};
+// stun:stun.l.google.com:19302
+  let configuration = {
+//     iceServers: []
+    iceServers: [{urls: "stun:stun.l.google.com:19302"}]
+    };
+
+  try {
+    peerConnection = new RTCPeerConnection(configuration);
+  } catch(err) {
+    trace('error: ' + err);
+  }
+  peerConnection.onicecandidate = handleicecandidate(lasticecandidate);
+
+  if (video_stream) {
+    video_stream.getTracks().forEach(track => peerConnection.addTrack(track, video_stream));
+  }
+  peerConnection.ontrack = evt => {
+    if (video_element.srcObject !== evt.streams[0]) {
+      video_element.srcObject = evt.streams[0];
+      trace('received remote stream', event);
+    }
+  }
+
+  // Diagnostics.
+  peerConnection.onicegatheringstatechange = () => trace(`onicegatheringstatechange: ${peerConnection.iceGatheringState}.`);
+  peerConnection.oniceconnectionstatechange = () => trace(`oniceconnectionstatechange: ${peerConnection.iceConnectionState}.`);
+  peerConnection.onsignalingstatechange = () => trace(`onsignalingstatechange: ${peerConnection.signalingState}.`);
+  peerConnection.onconnectionstatechange = () => trace(`onconnectionstatechange: ${peerConnection.connectionState}.`);
+
+  for (let key in media_events) {
+    video_element.addEventListener(key, (event) => { trace(event);});
+  }
+
+//   video_element.onloadedmetadata = () => {
+//     trace(`Remote video videoWidth: ${video_element.videoWidth}px,  videoHeight: ${video_element.videoHeight}px`);
+//   };
+
+  video_element.onresize = () => {
+    trace(`Remote video size changed to ${video_element.videoWidth}x${video_element.videoHeight}`);
+  }
+
+  return peerConnection;
+}
+
+function handleicecandidate(lasticecandidate) {
+  return function(event) {
+    if (event.candidate != null) {
+      trace('new ice candidate');
+    } else {
+      trace('all ice candidates');
+      lasticecandidate();
+    }
+  }
+}
+
+function canvasDraw(width, height) {
+	const canvas = Object.assign(document.createElement("canvas"), { width, height });
+	const ctx = canvas.getContext('2d');
+  let text_x = 0;
+  let text_y = 0;
+	ctx.fillRect(0, 0, width, height);
+	(function loop(){
+		ctx.fillStyle = "#000000";
+		ctx.fillRect(0, 0, width, height);
+
+    ctx.fillStyle = "green";
+    ctx.font = "30px serif";
+    ctx.textAlign = "center";
+    ctx.fillText("Camera disabled", width/2, text_y);
+    text_y += 1;
+    if (text_y > height) { text_y = 0; }
+		setTimeout(loop, 1000 / 30);
+		}
+	)();
+	return canvas.captureStream();
+}
+
+</script>
+
+</head>
+<body>
+	Server: <input type="text" id="server" value="ws://93.92.204.120:8881" />
+
+<!--
+	Your name: <input type="text" id="localName" value="my_name"/>
+-->
+
+	<button id="connect" onclick="connect();">Connect</button>
+	<button id="disconnect" onclick="disconnect();" disabled="true">Disconnect</button>
+	<br>
+	<table>
+		<tr>
+
+<!--
+			<td>
+				Target peer id: <input type="text" id="peer_id" size="3"/>
+			</td>
+-->
+
+			<td>
+				<button disabled="true" id="call" onclick="call();">Call</button>
+			</td>
+		</tr>
+		<tr>
+
+<!--
+			<td>
+				Message: <input type="text" id="message"/></td><td>
+			</td>
+-->
+
+		</tr>
+	<tr>
+		<td>
+<!--
+			https://stackoverflow.com/questions/49930680/how-to-handle-uncaught-in-promise-domexception-play-failed-because-the-use
+			To make the autoplay on html 5 elements work after the chrome 66 update you just need to add the muted property to the video element.
+-->
+			<video id="localVideoCtl" playsinline autoplay controls muted></video>
+		</td>
+		<td>
+			<video id="remoteVideoCtl" playsinline autoplay controls muted></video>
+		</td>
+	</tr>
+
+	</table>
+	<button onclick="document.getElementById('trace').innerHTML='';">
+	Clear log</button>
+
+	<pre id="trace"></pre>
+	<br>
+	<hr>
+</body>
+</html>
